@@ -1,20 +1,23 @@
 {
   "name": "transferencia-archivos",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Transferencia de archivos P2P por WiFi entre cualquier dispositivo, desde el navegador",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,magenta \"npm run dev -w @transfer/signaling-server\" \"npm run dev -w @transfer/web\"",
-    "dev:server": "npm run dev -w @transfer/signaling-server",
-    "dev:web": "npm run dev -w @transfer/web",
+    "dev": "concurrently -k -n server,web -c blue,magenta \"npm run dev -w @transfer/signaling-server\" \"npm run dev -w @transfer/web\"",
     "build": "npm run build -w @transfer/web",
+    "start": "npm run build && npm run serve",
+    "serve": "npm run start -w @transfer/signaling-server",
+    "test": "npm run test -w @transfer/web -w @transfer/signaling-server",
+    "test:e2e": "playwright test",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {
+    "@playwright/test": "~1.56.0",
     "concurrently": "^9.1.0",
     "typescript": "^5.6.3"
   },

@@ -1,25 +1,117 @@
-import { useRef, useState, type DragEvent } from 'react';
-import type { PeerInfo } from '@transfer/shared';
-import { defaultDeviceName, signalingUrl } from './signaling';
-import { useTransfers, type Transfer } from './useTransfers';
-import { formatBytes } from './format';
+import { useCallback, useEffect, useState } from 'react';
+import { detectDeviceKind, loadDeviceName, saveDeviceName } from './signaling';
+import { useTransfers } from './useTransfers';
+import { Header } from './components/Header';
+import { DeviceList } from './components/DeviceList';
+import { SendPanel } from './components/SendPanel';
+import { TransferList } from './components/TransferList';
+import { IncomingRequests } from './components/IncomingRequests';
+import { ConnectModal } from './components/ConnectModal';
+import { roomFromUrl, setRoomInUrl } from './lib/room';
+import { randomRoomCode } from './lib/format';
+import { fromFileList, type OutgoingFile } from './lib/files';
+import { takeSharedPayload } from './lib/idb';
+import { unlockAudio } from './lib/notify';
 
-const ICONS: Record<PeerInfo['kind'], string> = {
-  desktop: '💻',
-  mobile: '📱',
-  tablet: '📲',
-};
+const isDesktop = detectDeviceKind() === 'desktop';
+const BASE_TITLE = document.title;
 
 export function App() {
-  const [name] = useState(defaultDeviceName);
-  const { connected, self, peers, transfers, sendTo, answer, dismiss } = useTransfers(name);
+  const [name, setName] = useState(loadDeviceName);
+  const [room, setRoom] = useState(roomFromUrl);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [files, setFiles] = useState<File[]>([]);
-  const [dragging, setDragging] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<OutgoingFile[]>([]);
+  const [text, setText] = useState('');
+  const [mode, setMode] = useState<'files' | 'text'>('files');
+  const [showConnect, setShowConnect] = useState(false);
+
+  const changeRoom = useCallback((next: string) => {
+    setRoomInUrl(next);
+    setRoom(next);
+    setSelected(new Set());
+  }, []);
+
+  // El servidor exige sala (modo público): se crea una automáticamente y
+  // se muestra el modal para que el usuario la comparta con quien reciba.
+  const handleRoomRequired = useCallback(() => {
+    changeRoom(randomRoomCode());
+    setShowConnect(true);
+  }, [changeRoom]);
+
+  const { connected, peers, transfers, sendFilesTo, sendTextTo, answer, cancel, dismiss, clearFinished } =
+    useTransfers(name, room, handleRoomRequired);
 
   const targets = peers.filter((p) => selected.has(p.id));
-  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+  const incoming = transfers.filter((t) => t.status === 'incoming');
+
+  const addFiles = useCallback((added: OutgoingFile[]) => {
+    if (added.length) setFiles((prev) => [...prev, ...added]);
+  }, []);
+
+  // Olvidar a los que se desconectaron y, si solo queda uno, dejarlo elegido
+  useEffect(() => {
+    setSelected((prev) => {
+      const alive = new Set([...prev].filter((id) => peers.some((p) => p.id === id)));
+      if (alive.size === 0 && peers.length === 1) alive.add(peers[0].id);
+      return alive.size === prev.size && [...alive].every((id) => prev.has(id)) ? prev : alive;
+    });
+  }, [peers]);
+
+  // Lo que llegó desde "Compartir" en otra app (PWA instalada)
+  useEffect(() => {
+    if (!new URLSearchParams(location.search).has('shared')) return;
+    const url = new URL(location.href);
+    url.searchParams.delete('shared');
+    history.replaceState(null, '', url);
+    takeSharedPayload()
+      .then((shared) => {
+        if (!shared) return;
+        if (shared.files.length) addFiles(fromFileList(shared.files));
+        else if (shared.text) {
+          setText(shared.text);
+          setMode('text');
+        }
+      })
+      .catch(() => {});
+  }, [addFiles]);
+
+  // Pegar archivos o texto con Ctrl+V en cualquier parte de la página
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('input, textarea')) return;
+      const pasted = e.clipboardData?.files;
+      if (pasted && pasted.length) {
+        e.preventDefault();
+        setMode('files');
+        addFiles(fromFileList(pasted));
+        return;
+      }
+      const pastedText = e.clipboardData?.getData('text');
+      if (pastedText) {
+        setMode('text');
+        setText(pastedText);
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [addFiles]);
+
+  // Contador de solicitudes en el título de la pestaña
+  useEffect(() => {
+    document.title = incoming.length ? `(${incoming.length}) ${BASE_TITLE}` : BASE_TITLE;
+  }, [incoming.length]);
+
+  // El navegador solo deja sonar audio después de un toque del usuario
+  useEffect(() => {
+    window.addEventListener('pointerdown', unlockAudio, { once: true });
+    window.addEventListener('keydown', unlockAudio, { once: true });
+  }, []);
+
+  function rename(next: string) {
+    saveDeviceName(next);
+    setName(next);
+  }
 
   function togglePeer(id: string) {
     setSelected((prev) => {
@@ -30,192 +122,78 @@ export function App() {
     });
   }
 
-  function addFiles(list: FileList | null) {
-    if (!list) return;
-    // Copiar ya: el FileList del input se vacía cuando se resetea su value
-    const added = Array.from(list);
-    setFiles((prev) => [...prev, ...added]);
-  }
-
-  function onDrop(e: DragEvent) {
-    e.preventDefault();
-    setDragging(false);
-    addFiles(e.dataTransfer.files);
+  function toggleAll() {
+    const all = peers.every((p) => selected.has(p.id));
+    setSelected(all ? new Set() : new Set(peers.map((p) => p.id)));
   }
 
   function send() {
-    sendTo(
-      targets.map((p) => p.id),
-      files,
-    );
-    setFiles([]);
+    const ids = targets.map((p) => p.id);
+    if (mode === 'files') {
+      sendFilesTo(ids, files);
+      setFiles([]);
+    } else {
+      sendTextTo(ids, text);
+      setText('');
+    }
   }
 
   return (
-    <main className="app">
-      <header>
-        <h1>Transferencia de archivos</h1>
-        <p className={connected ? 'status ok' : 'status off'}>
-          {connected ? `Conectado como ${self?.name ?? name}` : `Sin conexión a ${signalingUrl()}`}
-        </p>
-      </header>
+    <>
+      <Header
+        name={name}
+        connected={connected}
+        room={room}
+        onRename={rename}
+        onOpenConnect={() => setShowConnect(true)}
+      />
 
-      <section>
-        <h2>Dispositivos en la red</h2>
-        {peers.length === 0 ? (
-          <p className="empty">Abre esta misma página en otro dispositivo conectado al mismo WiFi.</p>
-        ) : (
-          <ul className="peers">
-            {peers.map((p) => (
-              <li key={p.id}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={selected.has(p.id)}
-                    onChange={() => togglePeer(p.id)}
-                  />
-                  <span className="icon">{ICONS[p.kind]}</span>
-                  {p.name}
-                </label>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section>
-        <h2>Enviar</h2>
-        <div
-          className={dragging ? 'dropzone over' : 'dropzone'}
-          onClick={() => inputRef.current?.click()}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={onDrop}
-        >
-          {files.length === 0
-            ? 'Toca para elegir archivos o arrástralos aquí'
-            : `${files.length} archivo(s) · ${formatBytes(totalSize)}`}
-          <input
-            ref={inputRef}
-            type="file"
-            multiple
-            hidden
-            onChange={(e) => {
-              addFiles(e.target.files);
-              e.target.value = '';
-            }}
-          />
-        </div>
-        {files.length > 0 && (
-          <ul className="file-list">
-            {files.map((f, i) => (
-              <li key={`${f.name}-${i}`}>
-                <span>{f.name}</span>
-                <span className="muted">{formatBytes(f.size)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="actions">
-          {files.length > 0 && (
-            <button className="secondary" onClick={() => setFiles([])}>
-              Limpiar
-            </button>
-          )}
-          <button disabled={files.length === 0 || targets.length === 0} onClick={send}>
-            {targets.length === 0
-              ? 'Elige al menos un dispositivo'
-              : `Enviar a ${targets.length} dispositivo(s)`}
-          </button>
-        </div>
-      </section>
-
-      {transfers.length > 0 && (
-        <section>
-          <h2>Transferencias</h2>
-          <ul className="transfers">
-            {transfers.map((t) => (
-              <TransferItem key={t.id} transfer={t} onAnswer={answer} onDismiss={dismiss} />
-            ))}
-          </ul>
-        </section>
-      )}
-    </main>
-  );
-}
-
-const STATUS_LABEL: Record<Transfer['status'], string> = {
-  waiting: 'Esperando que acepte…',
-  incoming: 'Quiere enviarte archivos',
-  active: 'Transfiriendo…',
-  done: 'Completado',
-  rejected: 'Rechazado',
-  error: 'Error',
-};
-
-function TransferItem({
-  transfer: t,
-  onAnswer,
-  onDismiss,
-}: {
-  transfer: Transfer;
-  onAnswer: (id: string, accept: boolean) => void;
-  onDismiss: (id: string) => void;
-}) {
-  const percent = t.totalBytes === 0 ? 100 : Math.round((t.bytes / t.totalBytes) * 100);
-  const finished = t.status === 'done' || t.status === 'rejected' || t.status === 'error';
-
-  return (
-    <li className={`transfer ${t.status}`} data-testid="transfer">
-      <div className="transfer-head">
-        <strong>
-          {t.direction === 'out' ? `Para ${t.peerName}` : `De ${t.peerName}`}
-        </strong>
-        <span className="muted">
-          {t.files.length} archivo(s) · {formatBytes(t.totalBytes)}
-        </span>
-      </div>
-      <div className="transfer-status">
-        {STATUS_LABEL[t.status]}
-        {t.error ? `: ${t.error}` : ''}
-      </div>
-
-      {t.status === 'incoming' && (
-        <div className="actions">
-          <button className="secondary" onClick={() => onAnswer(t.id, false)}>
-            Rechazar
-          </button>
-          <button onClick={() => onAnswer(t.id, true)}>Aceptar</button>
+      {!connected && (
+        <div className="alert alert-warning rounded-0 border-0 border-bottom mb-0 small py-2 text-center">
+          <i className="bi bi-exclamation-triangle me-1" />
+          Sin conexión con el servidor. Reintentando…
         </div>
       )}
 
-      {(t.status === 'active' || t.status === 'done') && (
-        <div className="progress" aria-label={`${percent}%`}>
-          <div style={{ width: `${percent}%` }} />
+      <main className="container py-4">
+        <div className="row g-4">
+          <div className="col-lg-5">
+            <DeviceList
+              peers={peers}
+              selected={selected}
+              connected={connected}
+              room={room}
+              onToggle={togglePeer}
+              onToggleAll={toggleAll}
+              onOpenConnect={() => setShowConnect(true)}
+            />
+          </div>
+          <div className="col-lg-7 d-grid gap-4 align-content-start">
+            <SendPanel
+              files={files}
+              text={text}
+              mode={mode}
+              targetCount={targets.length}
+              isDesktop={isDesktop}
+              onModeChange={setMode}
+              onAdd={addFiles}
+              onRemove={(predicate) => setFiles((prev) => prev.filter((f) => !predicate(f)))}
+              onClear={() => setFiles([])}
+              onTextChange={setText}
+              onSend={send}
+            />
+            <TransferList
+              transfers={transfers}
+              onCancel={cancel}
+              onDismiss={dismiss}
+              onClearFinished={clearFinished}
+            />
+          </div>
         </div>
-      )}
+      </main>
 
-      {t.received.length > 0 && (
-        <ul className="received">
-          {t.received.map((r) => (
-            <li key={r.url}>
-              <a href={r.url} download={r.name}>
-                Guardar {r.name}
-              </a>
-              <span className="muted">{formatBytes(r.size)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {finished && (
-        <button className="link" onClick={() => onDismiss(t.id)}>
-          Quitar de la lista
-        </button>
-      )}
-    </li>
+      <IncomingRequests requests={incoming} onAnswer={answer} />
+      {showConnect && <ConnectModal room={room} onRoomChange={changeRoom} onClose={() => setShowConnect(false)} />}
+    </>
   );
 }

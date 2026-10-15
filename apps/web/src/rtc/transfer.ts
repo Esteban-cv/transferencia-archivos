@@ -10,8 +10,12 @@
  *   end                    ──►
  *                          ◄──     done
  *
+ *   Texto:  text {text}    ──►     ◄── done
+ *   Cualquiera de los dos puede mandar `cancel` y cerrar el canal.
+ *
  * Los mensajes de control viajan como texto JSON y los datos como binario.
  */
+import { memorySinkFactory, type FileSink, type SinkFactory } from './sinks';
 
 export const CHUNK_SIZE = 64 * 1024;
 const BUFFER_HIGH = 8 * 1024 * 1024;
@@ -19,6 +23,8 @@ const BUFFER_LOW = 1 * 1024 * 1024;
 
 export interface FileMeta {
   name: string;
+  /** Ruta relativa con carpetas, ej. "Fotos/playa.jpg". */
+  path: string;
   size: number;
   type: string;
 }
@@ -30,169 +36,295 @@ export interface TransferOffer {
 }
 
 export interface ReceivedFile extends FileMeta {
-  blob: Blob;
+  /** null si el archivo se escribió directo en disco. */
+  blob: Blob | null;
+}
+
+/** Lo mínimo que usamos de RTCDataChannel (permite probar el protocolo sin WebRTC). */
+export interface Channel extends EventTarget {
+  readonly readyState: RTCDataChannelState;
+  readonly bufferedAmount: number;
+  bufferedAmountLowThreshold: number;
+  binaryType: BinaryType;
+  send(data: string | ArrayBuffer): void;
+  close(): void;
 }
 
 type Control =
   | { t: 'offer'; senderName: string; files: FileMeta[] }
+  | { t: 'text'; senderName: string; text: string }
   | { t: 'accept' }
   | { t: 'reject' }
   | { t: 'file'; index: number }
   | { t: 'file-end'; index: number }
   | { t: 'end' }
-  | { t: 'done' };
+  | { t: 'done' }
+  | { t: 'cancel' };
 
-export class TransferRejectedError extends Error {
-  constructor() {
-    super('El receptor rechazó la transferencia');
+export type TransferEndReason = 'rejected' | 'cancelled' | 'remote-cancelled' | 'connection';
+
+/** Fin anticipado de una transferencia, con el motivo. */
+export class TransferEnded extends Error {
+  constructor(readonly reason: TransferEndReason) {
+    super(
+      {
+        rejected: 'El receptor rechazó la transferencia',
+        cancelled: 'Cancelaste la transferencia',
+        'remote-cancelled': 'El otro dispositivo canceló la transferencia',
+        connection: 'Se perdió la conexión con el otro dispositivo',
+      }[reason],
+    );
   }
 }
 
-function sendControl(channel: RTCDataChannel, msg: Control) {
-  channel.send(JSON.stringify(msg));
+function sendControl(channel: Channel, msg: Control) {
+  if (channel.readyState === 'open') channel.send(JSON.stringify(msg));
 }
 
-function waitOpen(channel: RTCDataChannel): Promise<void> {
+function waitOpen(channel: Channel): Promise<void> {
   if (channel.readyState === 'open') return Promise.resolve();
   return new Promise((resolve, reject) => {
     channel.addEventListener('open', () => resolve(), { once: true });
-    channel.addEventListener('close', () => reject(new Error('No se pudo abrir la conexión')), {
-      once: true,
-    });
+    channel.addEventListener('close', () => reject(new TransferEnded('connection')), { once: true });
   });
 }
 
-function nextControl(channel: RTCDataChannel): Promise<Control> {
-  return new Promise((resolve, reject) => {
-    const onMessage = (e: MessageEvent) => {
-      if (typeof e.data !== 'string') return;
-      cleanup();
-      resolve(JSON.parse(e.data));
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error('Se perdió la conexión con el otro dispositivo'));
-    };
-    const cleanup = () => {
-      channel.removeEventListener('message', onMessage);
-      channel.removeEventListener('close', onClose);
-    };
-    channel.addEventListener('message', onMessage);
-    channel.addEventListener('close', onClose);
+/** Cola de mensajes de control entrantes. */
+function controlInbox(channel: Channel) {
+  const queue: Control[] = [];
+  let waiter: ((msg: Control | null) => void) | null = null;
+  let closed = false;
+  let remoteCancelled = false;
+
+  channel.addEventListener('message', (e) => {
+    const data = (e as MessageEvent).data;
+    if (typeof data !== 'string') return;
+    const msg = JSON.parse(data) as Control;
+    if (msg.t === 'cancel') remoteCancelled = true;
+    if (waiter) {
+      const w = waiter;
+      waiter = null;
+      w(msg);
+    } else {
+      queue.push(msg);
+    }
   });
+  channel.addEventListener('close', () => {
+    closed = true;
+    if (waiter) {
+      const w = waiter;
+      waiter = null;
+      w(null);
+    }
+  });
+
+  return {
+    next(): Promise<Control | null> {
+      if (queue.length) return Promise.resolve(queue.shift()!);
+      if (closed) return Promise.resolve(null);
+      return new Promise((resolve) => (waiter = resolve));
+    },
+    get remoteCancelled() {
+      return remoteCancelled;
+    },
+  };
 }
 
 /** Espera a que el buffer del canal baje para no saturar la memoria. */
-function drain(channel: RTCDataChannel): Promise<void> {
+function drain(channel: Channel): Promise<void> {
   if (channel.bufferedAmount < BUFFER_HIGH) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const onLow = () => {
-      channel.removeEventListener('close', onClose);
+  return new Promise((resolve) => {
+    const finish = () => {
+      channel.removeEventListener('bufferedamountlow', finish);
+      channel.removeEventListener('close', finish);
       resolve();
     };
-    const onClose = () => {
-      channel.removeEventListener('bufferedamountlow', onLow);
-      reject(new Error('Se perdió la conexión con el otro dispositivo'));
-    };
-    channel.addEventListener('bufferedamountlow', onLow, { once: true });
-    channel.addEventListener('close', onClose, { once: true });
+    channel.addEventListener('bufferedamountlow', finish);
+    channel.addEventListener('close', finish);
   });
 }
 
-export function toMeta(file: File): FileMeta {
-  return { name: file.name, size: file.size, type: file.type };
+export interface OutgoingItem {
+  file: Blob;
+  name: string;
+  path: string;
+  type: string;
+}
+
+export interface SendCallbacks {
+  onAccepted: () => void;
+  onProgress: (sentBytes: number) => void;
 }
 
 /**
  * Envía los archivos por el canal. Resuelve cuando el receptor confirma que
- * recibió todo y lanza TransferRejectedError si el receptor no acepta.
+ * recibió todo; si no, lanza TransferEnded con el motivo.
  */
 export async function sendFiles(
-  channel: RTCDataChannel,
-  files: File[],
+  channel: Channel,
+  items: OutgoingItem[],
   senderName: string,
-  onAccepted: () => void,
-  onProgress: (sentBytes: number) => void,
+  callbacks: SendCallbacks,
+  signal?: AbortSignal,
 ): Promise<void> {
   channel.binaryType = 'arraybuffer';
   channel.bufferedAmountLowThreshold = BUFFER_LOW;
+  const inbox = controlInbox(channel);
+
+  const abortIfNeeded = () => {
+    if (signal?.aborted) {
+      sendControl(channel, { t: 'cancel' });
+      channel.close();
+      throw new TransferEnded('cancelled');
+    }
+    if (inbox.remoteCancelled) {
+      channel.close();
+      throw new TransferEnded('remote-cancelled');
+    }
+    if (channel.readyState !== 'open') throw new TransferEnded('connection');
+  };
+
   await waitOpen(channel);
+  sendControl(channel, {
+    t: 'offer',
+    senderName,
+    files: items.map((i) => ({ name: i.name, path: i.path, size: i.file.size, type: i.type })),
+  });
 
-  sendControl(channel, { t: 'offer', senderName, files: files.map(toMeta) });
-  const answer = await nextControl(channel);
-  if (answer.t !== 'accept') {
+  // Esperar la respuesta, atentos a una cancelación local mientras tanto
+  const onAbort = () => {
+    sendControl(channel, { t: 'cancel' });
     channel.close();
-    throw new TransferRejectedError();
+  };
+  signal?.addEventListener('abort', onAbort);
+  const answer = await inbox.next();
+  signal?.removeEventListener('abort', onAbort);
+  if (signal?.aborted) throw new TransferEnded('cancelled');
+  if (!answer) throw new TransferEnded('connection');
+  if (answer.t === 'reject') {
+    channel.close();
+    throw new TransferEnded('rejected');
   }
-  onAccepted();
+  if (answer.t !== 'accept') throw new TransferEnded('remote-cancelled');
+  callbacks.onAccepted();
 
-  const done = nextControl(channel);
   let sent = 0;
-  for (const [index, file] of files.entries()) {
+  for (const [index, item] of items.entries()) {
+    abortIfNeeded();
     sendControl(channel, { t: 'file', index });
-    for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
-      const chunk = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
+    for (let offset = 0; offset < item.file.size; offset += CHUNK_SIZE) {
+      const chunk = await item.file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
       await drain(channel);
+      abortIfNeeded();
       channel.send(chunk);
       sent += chunk.byteLength;
-      onProgress(sent);
+      callbacks.onProgress(sent);
     }
     sendControl(channel, { t: 'file-end', index });
   }
   sendControl(channel, { t: 'end' });
 
-  await done;
+  const final = await inbox.next();
+  if (final?.t === 'cancel') throw new TransferEnded('remote-cancelled');
+  if (final?.t !== 'done') throw new TransferEnded('connection');
   channel.close();
 }
 
+/** Envía un texto corto (link, nota, contraseña del WiFi…). */
+export async function sendText(channel: Channel, text: string, senderName: string): Promise<void> {
+  const inbox = controlInbox(channel);
+  await waitOpen(channel);
+  sendControl(channel, { t: 'text', senderName, text });
+  const reply = await inbox.next();
+  if (reply?.t !== 'done') throw new TransferEnded('connection');
+  channel.close();
+}
+
+export interface OfferDecision {
+  accept: boolean;
+  /** Dónde escribir los archivos; por defecto en memoria (Blobs). */
+  sinkFactory?: SinkFactory;
+}
+
 export interface ReceiveHandlers {
-  /** Debe resolver true si el usuario acepta la transferencia. */
-  onOffer: (offer: TransferOffer) => Promise<boolean>;
+  /** Se llama cuando llega una oferta; resolver con la decisión del usuario. */
+  onOffer: (offer: TransferOffer) => Promise<OfferDecision>;
+  onText: (text: string, senderName: string) => void;
   onProgress: (receivedBytes: number) => void;
   onFile: (file: ReceivedFile) => void;
   onDone: () => void;
-  onError: (err: Error) => void;
+  onEnded: (reason: TransferEndReason) => void;
 }
 
-/** Atiende un canal entrante abierto por otro dispositivo. */
-export function receiveFiles(channel: RTCDataChannel, handlers: ReceiveHandlers) {
+export interface IncomingController {
+  cancel: () => void;
+}
+
+/** Atiende un canal abierto por otro dispositivo. */
+export function receiveTransfer(channel: Channel, handlers: ReceiveHandlers): IncomingController {
   channel.binaryType = 'arraybuffer';
 
   let files: FileMeta[] = [];
-  let current: { index: number; parts: ArrayBuffer[] } | null = null;
+  let factory: SinkFactory = memorySinkFactory;
+  let sink: FileSink | null = null;
   let received = 0;
   let finished = false;
+  let failed = false;
+  let awaitingDecision = false;
+  // Los mensajes se procesan en orden, esperando cada escritura en disco
+  let chain = Promise.resolve();
 
-  channel.addEventListener('message', async (e: MessageEvent) => {
-    if (typeof e.data !== 'string') {
-      if (!current) return;
-      current.parts.push(e.data as ArrayBuffer);
-      received += (e.data as ArrayBuffer).byteLength;
+  const end = async (reason: TransferEndReason) => {
+    if (finished) return;
+    finished = true;
+    await sink?.abort().catch(() => {});
+    sink = null;
+    handlers.onEnded(reason);
+  };
+
+  const handle = async (data: unknown) => {
+    if (finished) return;
+
+    if (typeof data !== 'string') {
+      if (!sink) return;
+      const chunk = data as ArrayBuffer;
+      await sink.write(chunk);
+      received += chunk.byteLength;
       handlers.onProgress(received);
       return;
     }
 
-    const msg = JSON.parse(e.data) as Control;
+    const msg = JSON.parse(data) as Control;
     switch (msg.t) {
+      case 'text':
+        finished = true;
+        handlers.onText(msg.text, msg.senderName);
+        sendControl(channel, { t: 'done' });
+        break;
       case 'offer': {
-        files = msg.files;
+        files = msg.files.map((f) => ({ ...f, path: f.path || f.name }));
         const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
-        const accepted = await handlers.onOffer({ senderName: msg.senderName, files, totalBytes });
-        // Si se rechaza, el emisor cierra el canal y eso no es un error
-        if (!accepted) finished = true;
-        if (channel.readyState !== 'open') return;
-        sendControl(channel, { t: accepted ? 'accept' : 'reject' });
+        awaitingDecision = true;
+        const decision = await handlers.onOffer({ senderName: msg.senderName, files, totalBytes });
+        awaitingDecision = false;
+        if (finished) return; // el emisor canceló mientras decidíamos
+        if (!decision.accept) {
+          finished = true; // el emisor cerrará el canal: no es un error
+          sendControl(channel, { t: 'reject' });
+          return;
+        }
+        factory = decision.sinkFactory ?? memorySinkFactory;
+        sendControl(channel, { t: 'accept' });
         break;
       }
       case 'file':
-        current = { index: msg.index, parts: [] };
+        sink = await factory(files[msg.index]);
         break;
       case 'file-end': {
-        if (!current || current.index !== msg.index) break;
-        const meta = files[msg.index];
-        const blob = new Blob(current.parts, { type: meta.type || 'application/octet-stream' });
-        current = null;
-        handlers.onFile({ ...meta, blob });
+        if (!sink) break;
+        const blob = await sink.close();
+        sink = null;
+        handlers.onFile({ ...files[msg.index], blob });
         break;
       }
       case 'end':
@@ -200,12 +332,42 @@ export function receiveFiles(channel: RTCDataChannel, handlers: ReceiveHandlers)
         sendControl(channel, { t: 'done' });
         handlers.onDone();
         break;
+      case 'cancel':
+        await end('remote-cancelled');
+        break;
     }
+  };
+
+  channel.addEventListener('message', (e) => {
+    const data = (e as MessageEvent).data;
+    // Una cancelación no espera en la cola (puede estar esperando la decisión del usuario)
+    if (typeof data === 'string' && awaitingDecision && JSON.parse(data).t === 'cancel') {
+      void end('remote-cancelled');
+      return;
+    }
+    chain = chain
+      .then(() => handle(data))
+      .catch(async (err) => {
+        if (failed) return;
+        failed = true;
+        console.error('Error recibiendo archivos', err);
+        sendControl(channel, { t: 'cancel' });
+        channel.close();
+        await end('connection');
+      });
   });
 
   channel.addEventListener('close', () => {
-    if (!finished && files.length > 0) {
-      handlers.onError(new Error('Se perdió la conexión con el otro dispositivo'));
-    }
+    if (awaitingDecision) void end('connection');
+    else chain = chain.then(() => end('connection'));
   });
+
+  return {
+    cancel() {
+      if (finished) return;
+      sendControl(channel, { t: 'cancel' });
+      channel.close();
+      void end('cancelled');
+    },
+  };
 }

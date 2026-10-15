@@ -1,79 +1,63 @@
-import { randomUUID } from 'node:crypto';
-import { networkInterfaces } from 'node:os';
-import { WebSocketServer, WebSocket } from 'ws';
-import {
-  DEFAULT_SIGNALING_PORT,
-  type ClientMessage,
-  type PeerInfo,
-  type ServerMessage,
-} from '@transfer/shared';
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { DEFAULT_PORT } from '@transfer/shared';
+import { startAppServer } from './server';
+import { lanAddresses } from './network';
 
-const PORT = Number(process.env.PORT ?? DEFAULT_SIGNALING_PORT);
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(here, '../../..');
 
-interface Client {
-  socket: WebSocket;
-  info: PeerInfo | null;
-}
+const port = Number(process.env.PORT ?? DEFAULT_PORT);
+const staticDir = resolve(repoRoot, 'apps/web/dist');
+const certFile = resolve(repoRoot, 'certs/cert.pem');
+const keyFile = resolve(repoRoot, 'certs/key.pem');
+const tls = existsSync(certFile) && existsSync(keyFile) ? { cert: certFile, key: keyFile } : undefined;
+const devMode = process.argv.includes('--dev');
 
-const clients = new Map<string, Client>();
+// Variables de entorno para cuando el servidor queda expuesto en internet
+// (ver "Publicarla en internet" en el README). En LAN no hace falta tocarlas.
+const requireRoom = ['1', 'true'].includes((process.env.REQUIRE_ROOM ?? '').toLowerCase());
+const trustProxy = ['1', 'true'].includes((process.env.TRUST_PROXY ?? '').toLowerCase());
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
 
-function send(socket: WebSocket, message: ServerMessage) {
-  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
-}
+try {
+  const app = await startAppServer({
+    port,
+    staticDir: devMode ? undefined : staticDir,
+    tls,
+    requireRoom,
+    trustProxy,
+    allowedOrigins,
+  });
+  const scheme = app.https ? 'https' : 'http';
 
-function broadcast(message: ServerMessage, exceptId?: string) {
-  for (const [id, client] of clients) {
-    if (id !== exceptId && client.info) send(client.socket, message);
+  console.log('');
+  if (devMode) {
+    console.log(`  Señalización lista en el puerto ${app.port} (modo desarrollo)`);
+  } else {
+    console.log('  Transferencia de archivos lista. Abre en cualquier dispositivo del mismo WiFi:');
+    console.log('');
+    console.log(`    Esta PC:   ${scheme}://localhost:${app.port}`);
+    for (const ip of lanAddresses()) console.log(`    En la red: ${scheme}://${ip}:${app.port}`);
+    console.log('');
+    console.log('  Deja esta ventana abierta mientras la usen. Ctrl+C para cerrar.');
   }
+  if (requireRoom) console.log('  Modo público: cada quien necesita un código de sala para verse con otros.');
+  if (trustProxy) console.log('  Confiando en X-Forwarded-For para la IP real (TRUST_PROXY=1).');
+  if (allowedOrigins?.length) console.log(`  Solo se aceptan conexiones desde: ${allowedOrigins.join(', ')}`);
+  console.log('');
+
+  const shutdown = () => app.close().then(() => process.exit(0));
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+} catch (err) {
+  if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+    console.error(`\n  El puerto ${port} ya está en uso. ¿Ya hay otra ventana con la app abierta?\n`);
+  } else {
+    console.error(err);
+  }
+  process.exit(1);
 }
-
-const wss = new WebSocketServer({ port: PORT, host: '0.0.0.0' });
-
-wss.on('connection', (socket) => {
-  const id = randomUUID();
-  clients.set(id, { socket, info: null });
-
-  socket.on('message', (raw) => {
-    let msg: ClientMessage;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return send(socket, { type: 'error', message: 'Mensaje inválido' });
-    }
-
-    const client = clients.get(id);
-    if (!client) return;
-
-    switch (msg.type) {
-      case 'hello': {
-        client.info = { id, name: msg.name.slice(0, 40), kind: msg.kind };
-        const peers = [...clients.values()]
-          .map((c) => c.info)
-          .filter((p): p is PeerInfo => p !== null && p.id !== id);
-        send(socket, { type: 'welcome', self: client.info, peers });
-        broadcast({ type: 'peer-joined', peer: client.info }, id);
-        break;
-      }
-      case 'signal': {
-        const target = clients.get(msg.to);
-        if (!target) return send(socket, { type: 'error', message: 'El dispositivo ya no está conectado' });
-        send(target.socket, { type: 'signal', from: id, payload: msg.payload });
-        break;
-      }
-    }
-  });
-
-  socket.on('close', () => {
-    const had = clients.get(id)?.info;
-    clients.delete(id);
-    if (had) broadcast({ type: 'peer-left', id });
-  });
-});
-
-const lanIps = Object.values(networkInterfaces())
-  .flat()
-  .filter((i) => i && i.family === 'IPv4' && !i.internal)
-  .map((i) => i!.address);
-
-console.log(`Servidor de señalización escuchando en el puerto ${PORT}`);
-for (const ip of lanIps) console.log(`  ws://${ip}:${PORT}`);
