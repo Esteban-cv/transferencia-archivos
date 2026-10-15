@@ -4,6 +4,7 @@
   --accent: #2563eb;
   --ok: #16a34a;
   --off: #dc2626;
+  --line: color-mix(in srgb, currentColor 20%, transparent);
 }
 
 body {
@@ -21,33 +22,152 @@ h1 {
   font-size: 1.5rem;
 }
 
+h2 {
+  font-size: 1.1rem;
+  margin: 24px 0 12px;
+}
+
 .status {
-  margin: 0 0 24px;
+  margin: 0;
   font-size: 0.9rem;
 }
 .status.ok { color: var(--ok); }
 .status.off { color: var(--off); }
 
-.empty {
+.empty,
+.muted {
   opacity: 0.7;
 }
 
-.peers {
+ul {
   list-style: none;
   padding: 0;
+  margin: 0;
+}
+
+.peers {
   display: grid;
   gap: 8px;
 }
 
-.peers li {
+.peers label {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border: 1px solid var(--line);
   border-radius: 12px;
+  cursor: pointer;
+}
+
+.peers input {
+  width: 18px;
+  height: 18px;
 }
 
 .icon {
   font-size: 1.4rem;
+}
+
+.dropzone {
+  padding: 28px 16px;
+  border: 2px dashed var(--line);
+  border-radius: 12px;
+  text-align: center;
+  cursor: pointer;
+}
+.dropzone.over {
+  border-color: var(--accent);
+}
+
+.file-list,
+.received {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+  font-size: 0.9rem;
+}
+
+.file-list li,
+.received li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+button {
+  font: inherit;
+  padding: 10px 16px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+button.secondary {
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--line);
+}
+button.link {
+  background: none;
+  color: inherit;
+  opacity: 0.7;
+  padding: 8px 0 0;
+  font-size: 0.85rem;
+}
+
+.transfers {
+  display: grid;
+  gap: 12px;
+}
+
+.transfer {
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.transfer-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.transfer-status {
+  font-size: 0.9rem;
+  margin-top: 4px;
+}
+.transfer.done .transfer-status { color: var(--ok); }
+.transfer.error .transfer-status,
+.transfer.rejected .transfer-status { color: var(--off); }
+
+.progress {
+  height: 6px;
+  margin-top: 8px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+.progress div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+.received a {
+  color: var(--accent);
 }

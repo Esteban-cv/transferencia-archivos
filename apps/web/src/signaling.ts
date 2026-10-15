@@ -5,6 +5,8 @@ import {
   type ServerMessage,
 } from '@transfer/shared';
 
+const RECONNECT_DELAY_MS = 2000;
+
 export function signalingUrl(): string {
   const fromEnv = import.meta.env.VITE_SIGNALING_URL as string | undefined;
   if (fromEnv) return fromEnv;
@@ -25,23 +27,50 @@ export function defaultDeviceName(): string {
   return `${label}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 }
 
+export interface SignalingConnection {
+  send: (msg: ClientMessage) => void;
+  close: () => void;
+}
+
+/**
+ * Conecta al servidor de señalización y se reconecta solo si se cae
+ * (por ejemplo, al reiniciar el servidor en desarrollo). Tras cada
+ * reconexión llega un nuevo 'welcome' con un id distinto.
+ */
 export function connectSignaling(
   name: string,
   onMessage: (msg: ServerMessage) => void,
   onStatus: (open: boolean) => void,
-) {
-  const socket = new WebSocket(signalingUrl());
+): SignalingConnection {
+  let socket: WebSocket;
+  let closedByUser = false;
+  let retry: ReturnType<typeof setTimeout> | undefined;
 
-  socket.addEventListener('open', () => {
-    onStatus(true);
-    send({ type: 'hello', name, kind: detectDeviceKind() });
-  });
-  socket.addEventListener('close', () => onStatus(false));
-  socket.addEventListener('message', (e) => onMessage(JSON.parse(e.data)));
+  function open() {
+    socket = new WebSocket(signalingUrl());
+    socket.addEventListener('open', () => {
+      onStatus(true);
+      send({ type: 'hello', name, kind: detectDeviceKind() });
+    });
+    socket.addEventListener('message', (e) => onMessage(JSON.parse(e.data)));
+    socket.addEventListener('close', () => {
+      onStatus(false);
+      if (!closedByUser) retry = setTimeout(open, RECONNECT_DELAY_MS);
+    });
+  }
 
   function send(msg: ClientMessage) {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
   }
 
-  return { send, close: () => socket.close() };
+  open();
+
+  return {
+    send,
+    close: () => {
+      closedByUser = true;
+      clearTimeout(retry);
+      socket.close();
+    },
+  };
 }

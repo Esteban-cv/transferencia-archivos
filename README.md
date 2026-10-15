@@ -27,12 +27,20 @@ Eso levanta el servidor de señalización (puerto 8787) y Vite (puerto 5173). En
 
 Si Windows pregunta por el firewall, permite el acceso en redes privadas para Node.
 
+## Cómo se usa
+
+1. Abre la app en dos o más dispositivos conectados al mismo WiFi.
+2. En el que envía, marca uno o varios dispositivos de la lista y elige (o arrastra) los archivos.
+3. Cada receptor ve la solicitud y elige **Aceptar** o **Rechazar**.
+4. Al terminar, cada archivo aparece con un enlace **Guardar**.
+
 ## Hoja de ruta
 
 1. [x] Estructura del monorepo y descubrimiento de dispositivos en la red
-2. [ ] Conexión WebRTC entre dos dispositivos y envío de un archivo
-3. [ ] Envío por chunks con control de backpressure (archivos de hasta ~3 GB)
-4. [ ] Varios archivos y carpetas
-5. [ ] Un emisor a varios receptores (mesh P2P)
-6. [ ] Guardado en disco por streaming (File System Access API / StreamSaver)
-7. [ ] HTTPS en LAN y PWA
+2. [x] Conexión WebRTC entre dispositivos y envío de archivos
+3. [x] Envío por chunks con control de backpressure
+4. [x] Varios archivos por envío
+5. [x] Un emisor a varios receptores (mesh P2P)
+6. [ ] Guardado en disco por streaming (File System Access API / StreamSaver), necesario para archivos de varios GB
+7. [ ] Envío de carpetas completas
+8. [ ] HTTPS en LAN y PWA
