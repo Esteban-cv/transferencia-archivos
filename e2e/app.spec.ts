@@ -157,7 +157,7 @@ test('las salas privadas aíslan dispositivos y el QR lleva el código', async (
 
   await a.page.getByRole('button', { name: 'Conectar' }).click();
   const modal = a.page.getByRole('dialog');
-  await modal.getByRole('button', { name: 'Crear sala' }).click();
+  await modal.getByRole('button', { name: 'Crear sala nueva' }).click();
   const code = (await modal.locator('.badge.font-monospace').textContent())!.trim();
   expect(code).toMatch(/^[A-Z2-9]{6}$/);
   await expect(modal.locator('.qr svg')).toBeVisible();
@@ -169,4 +169,18 @@ test('las salas privadas aíslan dispositivos y el QR lleva el código', async (
   await expect(b.page.locator('.list-group-item', { hasText: 'PC Sala A' })).toBeVisible();
   await expect(a.page.locator('.list-group-item', { hasText: 'PC Pública' })).toHaveCount(0);
   await expect(publico.page.locator('.list-group-item', { hasText: 'PC Sala' })).toHaveCount(0);
+});
+
+test('estando en una sala se puede escribir el código de otra y cambiarse', async ({ browser }) => {
+  const destino = await openDevice(browser, 'PC Destino', '/?sala=ABC123');
+  const origen = await openDevice(browser, 'Cel Origen', '/?sala=XYZ999');
+
+  await origen.page.getByTitle('Conectar otro dispositivo o cambiar de sala').click();
+  const modal = origen.page.getByRole('dialog');
+  await expect(modal.locator('.badge.font-monospace')).toHaveText('XYZ999');
+  await modal.getByLabel('Código de sala').fill('ABC123');
+  await modal.getByRole('button', { name: 'Unirme' }).click();
+  await expect(modal.locator('.badge.font-monospace')).toHaveText('ABC123');
+
+  await expect(destino.page.locator('.list-group-item', { hasText: 'Cel Origen' })).toBeVisible();
 });
