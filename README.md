@@ -77,6 +77,18 @@ Pasos para Render (plan gratis):
 
 El plan gratis de Render apaga el servicio tras ~15 minutos sin uso y tarda unos segundos en despertar con la primera visita — normal, no es un error.
 
+### Conectar entre redes distintas (datos móviles de operadoras distintas)
+
+Por defecto WebRTC solo usa un servidor STUN público, que ayuda a los dispositivos a encontrarse pero no reenvía datos. Eso alcanza en la misma red, pero entre datos móviles de operadoras distintas casi nunca: las operadoras ponen a muchos celulares detrás de una misma IP (CGNAT) y la conexión directa no se puede abrir. Los dispositivos se ven en la lista, pero la transferencia no arranca.
+
+Para eso hace falta un relevo TURN, que solo se usa cuando la conexión directa falla y reenvía los paquetes ya cifrados (no puede ver los archivos). La app lo trae listo para [Metered](https://www.metered.ca/), que tiene plan gratis de 20 GB al mes:
+
+1. Crea una cuenta gratis en [dashboard.metered.ca/signup?tool=turnserver](https://dashboard.metered.ca/signup?tool=turnserver) (no pide tarjeta).
+2. Anota el **nombre de tu app** (el subdominio de `<nombre>.metered.live`) y crea/copia un **API key** en la sección de credenciales TURN.
+3. En Render, en **Environment**, agrega `METERED_APP_NAME=<nombre>` y `METERED_API_KEY=<tu key>`, y vuelve a desplegar.
+
+Al arrancar, el servidor muestra "Relevo TURN activo (Metered)" si quedó bien configurado. Sin esas variables la app sigue funcionando igual que antes (solo STUN). Ten en cuenta que lo que pasa por el relevo también consume los datos móviles de ambos dispositivos, como cualquier descarga.
+
 ## Desarrollo
 
 ```bash

@@ -109,6 +109,12 @@ describe('servidor de señalización', () => {
     expect(res.headers.get('x-frame-options')).toBe('DENY');
   });
 
+  it('sin Metered configurado, /api/turn-credentials devuelve lista vacía', async () => {
+    const port = await start();
+    const res = await fetch(`http://127.0.0.1:${port}/api/turn-credentials`);
+    expect(await res.json()).toEqual({ iceServers: [] });
+  });
+
   it('exige sala cuando requireRoom está activo, y deja pasar con sala', async () => {
     const port = await start(undefined, { requireRoom: true });
 

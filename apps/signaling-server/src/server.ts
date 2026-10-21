@@ -7,8 +7,9 @@ import { attachSignaling } from './signaling';
 import { applySecurityHeaders } from './securityHeaders';
 import { createStaticHandler } from './static';
 import { lanAddresses } from './network';
+import { getIceServers, type TurnOptions } from './turnCredentials';
 
-export interface AppServerOptions {
+export interface AppServerOptions extends TurnOptions {
   port: number;
   host?: string;
   /** Carpeta con la app compilada. Sin ella solo funciona la señalización (modo desarrollo). */
@@ -29,7 +30,7 @@ export async function startAppServer(options: AppServerOptions) {
     : null;
   const https = Boolean(options.tls);
 
-  const handler = (req: IncomingMessage, res: ServerResponse) => {
+  const handler = async (req: IncomingMessage, res: ServerResponse) => {
     applySecurityHeaders(res);
 
     if (req.url?.startsWith('/api/info')) {
@@ -41,6 +42,12 @@ export async function startAppServer(options: AppServerOptions) {
       };
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(info));
+      return;
+    }
+    if (req.url?.startsWith('/api/turn-credentials')) {
+      const iceServers = await getIceServers(options);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ iceServers }));
       return;
     }
     if (serveStatic) {

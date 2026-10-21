@@ -22,6 +22,8 @@ const trustProxy = ['1', 'true'].includes((process.env.TRUST_PROXY ?? '').toLowe
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+const meteredAppName = process.env.METERED_APP_NAME || undefined;
+const meteredApiKey = process.env.METERED_API_KEY || undefined;
 
 try {
   const app = await startAppServer({
@@ -31,6 +33,8 @@ try {
     requireRoom,
     trustProxy,
     allowedOrigins,
+    meteredAppName,
+    meteredApiKey,
   });
   const scheme = app.https ? 'https' : 'http';
 
@@ -48,6 +52,11 @@ try {
   if (requireRoom) console.log('  Modo público: cada quien necesita un código de sala para verse con otros.');
   if (trustProxy) console.log('  Confiando en X-Forwarded-For para la IP real (TRUST_PROXY=1).');
   if (allowedOrigins?.length) console.log(`  Solo se aceptan conexiones desde: ${allowedOrigins.join(', ')}`);
+  if (meteredAppName && meteredApiKey) {
+    console.log('  Relevo TURN activo (Metered): funciona también entre redes distintas (datos móviles).');
+  } else {
+    console.log('  Sin relevo TURN: solo funciona bien en la misma red (WiFi o datos de la misma operadora).');
+  }
   console.log('');
 
   const shutdown = () => app.close().then(() => process.exit(0));

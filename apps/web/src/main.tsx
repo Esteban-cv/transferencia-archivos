@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import 'bootstrap-icons/font/bootstrap-icons.min.css';
 import { App } from './App';
+import { loadIceServers } from './rtc/iceServers';
 import './styles.css';
 
 // Tema claro u oscuro según el sistema del dispositivo
@@ -18,8 +19,11 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator && window.isSecureConte
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+// Pide al servidor el relevo TURN (si lo tiene) antes de crear conexiones
+loadIceServers().finally(() => {
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+});

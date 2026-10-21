@@ -1,13 +1,5 @@
 import type { SignalPayload } from '@transfer/shared';
-
-/**
- * En la misma red local WebRTC conecta directo con los candidatos "host".
- * El STUN público solo ayuda cuando la red tiene NAT entre dispositivos;
- * nunca transporta los archivos.
- */
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-};
+import { currentIceServers } from './iceServers';
 
 type SendSignal = (to: string, payload: SignalPayload) => void;
 type OnChannel = (peerId: string, channel: RTCDataChannel) => void;
@@ -19,7 +11,7 @@ type OnChannel = (peerId: string, channel: RTCDataChannel) => void;
  * puedan iniciar sin pisarse.
  */
 class PeerLink {
-  readonly pc = new RTCPeerConnection(RTC_CONFIG);
+  readonly pc = new RTCPeerConnection({ iceServers: currentIceServers() });
   private makingOffer = false;
   private ignoreOffer = false;
 
